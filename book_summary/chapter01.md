@@ -34,9 +34,11 @@
 
 **目的**  
 イベントベースの記録を収集し、システムの動作やプロセスの関連性を可視化する。  
+OSに限らずアプリケーションにも適用できる
 
 **代表例**  
 Linux では `strace`, `tcpdump`, `Ftrace`, `BCC`, `bpftrace` など。  
+
 
 トレーシングには大きく2種類ある：  
 
@@ -49,6 +51,58 @@ Linux では `strace`, `tcpdump`, `Ftrace`, `BCC`, `bpftrace` など。
 - ソースコードに予めトレースポイントを仕込んでおく方法。  
 - Linux カーネルでは **tracepoint**、ライブラリでは **USDT (User Statically Defined Tracing)** と呼ばれる。  
 - **例**：`execsnoop` → `execve()` システムコールをトレースして、SSH ログインなどの実行プロセスを観察可能。  
+実例、OSにbpftraceをinstallする。
+```bash
+sudo apt install bpftrace
+```
+mysqlのソースコードにUSDT マクロを仕込むで、ビルドする。
+```
+#include <sys/sdt.h>   // USDT のヘッダ
+
+void mysql_execute_query(const char *query) {
+    DTRACE_PROBE(mysql, query__start);   // クエリ開始を通知
+
+    // 実際のクエリ実行処理
+    execute(query);
+
+    DTRACE_PROBE(mysql, query__done);    // クエリ終了を通知
+}
+
+```
+
+- DTRACE_PROBE(mysql, query__start)
+→ 「mysql:query__start」というイベントを発火するトレースポイント。
+
+- DTRACE_PROBE(mysql, query__done)
+→ 「mysql:query__done」というイベントを発火。
+
+
+#### ✅ 観測の流れ
+
+1. MySQL バイナリに USDT が埋め込まれている  
+2. MySQL がクエリを実行すると、そのトレースポイントが発火する  
+3. OS 上で `bpftrace` がそれをキャッチして出力する  
+
+---
+
+#### ✅ まとめ
+
+- **埋め込むのは MySQL 開発者**（ソースコードに仕込む）  
+- **利用するのは MySQL ユーザ**（`bpftrace` などで外から観測する）  
+- MySQL ユーザは「USDT がすでに入っているか確認し、必要なら `bpftrace` で使う」だけでよい  
+
+**例：クエリ開始イベントを観測**
+```bash
+sudo bpftrace -e 'usdt:/usr/sbin/mysqld:query__start { printf("Query started\n"); }'
+```
+
+ちなみに、ログ（general log, Error log等）やPerfomance Schemaとは別。
+| 手法                                              | 取得できる情報                       | 特徴                                 | メリット                                                         | デメリット                                    | 主な利用シーン                       |
+| ----------------------------------------------- | ----------------------------- | ---------------------------------- | ------------------------------------------------------------ | ---------------------------------------- | ----------------------------- |
+| **ログ (General Log, Slow Query Log, Error Log)** | 実行されたクエリ全文、エラー、スロークエリ         | MySQL 内部でファイルやテーブルに記録              | ・設定だけで簡単に有効化できる<br>・SQL をそのまま確認可能                            | ・I/O 負荷が大きい<br>・大量トラフィック環境では現実的でない       | 開発・検証環境での調査、トラブル発生時の一時的利用     |
+| **Performance Schema**                          | クエリ実行時間、待機イベント、ロック、メモリ使用量など   | MySQL 内部のテーブルに統計情報を蓄積              | ・詳細な統計を取得可能<br>・SQL で柔軟に分析できる                                | ・設定とクエリのチューニングが必要<br>・細かすぎて運用が複雑化することも   | 本番環境での継続的なパフォーマンス監視           |
+| **USDT (User Statically Defined Tracing)**      | クエリ開始/終了、ロック待ち開始/終了など（外部から取得） | MySQL バイナリに埋め込まれたトレースポイントを外部ツールで利用 | ・外部から非侵襲的に観測可能<br>・無効時オーバーヘッドほぼゼロ<br>・bpftrace/dtrace で柔軟に解析 | ・使えるイベントはあらかじめ埋め込まれたものに限られる<br>・ツール習熟が必要 | 本番環境での軽量トラブルシューティング、SRE による調査 |
+
 
 ---
 
